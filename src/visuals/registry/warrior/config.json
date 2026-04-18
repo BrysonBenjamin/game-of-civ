@@ -1,0 +1,13 @@
+{
+  "id": "WARRIOR",
+  "modelPath": "/models/warrior.glb",
+  "baseScale": 1.5,
+  "yOffset": 4,
+  "selectionColor": "#FFB81C",
+  "animations": {
+    "idle": "Idle",
+    "move": "Walk",
+    "action": "Attack"
+  },
+  "glowIntensity": 0.8
+}
