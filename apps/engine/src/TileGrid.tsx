@@ -1,5 +1,4 @@
-import { useMemo, useRef, useEffect } from 'react';
-import { useThree } from '@react-three/fiber';
+import { useMemo, useRef } from 'react';
 import * as THREE from 'three/webgpu';
 import {
   storage,
@@ -23,7 +22,6 @@ import {
   varying,
 } from 'three/tsl';
 import { HexConstants } from './constants';
-import { createHeightmapComputeBinding } from './renderer/compute/HeightmapCompute';
 
 interface TileGridProps {
   mapBuffer: Float32Array;
@@ -46,32 +44,18 @@ const SNOW       = color('#d0dde8');
 const PARCHMENT  = color('#d2b48c');
 const SNOW_WHITE = color('#f0f0f0'); // Peak tint target
 
-export default function TileGrid({ mapBuffer, count, heightmapTexture: initialHeightmapTexture }: TileGridProps) {
+export default function TileGrid({ mapBuffer, count, heightmapTexture }: TileGridProps) {
   const meshRef = useRef<THREE.InstancedMesh>(null);
-  const heightmapTextureRef = useRef<any>(initialHeightmapTexture);
-  const computeDispatchedRef = useRef(false);
-  const { gl } = useThree();
-
-  // Initialize heightmap compute if not already done
-  useEffect(() => {
-    if (!computeDispatchedRef.current && gl && (gl as any).computeAsync) {
-      const { storeTexture, computeNode } = createHeightmapComputeBinding();
-      (gl as any).computeAsync(computeNode).then(() => {
-        heightmapTextureRef.current = storeTexture;
-        console.log('Heightmap compute shader executed');
-      }).catch((err: any) => {
-        console.error('Failed to execute heightmap compute:', err);
-      });
-      computeDispatchedRef.current = true;
-    }
-  }, [gl]);
 
   // Create the WebGPU Storage Attribute
   const bufferAttr = useMemo(() => {
     return new THREE.StorageInstancedBufferAttribute(mapBuffer, 4);
   }, [mapBuffer]);
 
-  // TSL Materials are compiled once per mount
+  // Recompiles whenever mapBuffer, count, or heightmapTexture (App state) changes.
+  // heightmapTexture arrives as null on first render then flips to the baked
+  // StorageTexture once App.tsx's computeAsync resolves — that state update causes
+  // a re-render here and rebuilds the full node material with live texture reads.
   const materialNode = useMemo(() => {
     // Read the vec4 from the storage buffer using instanceIndex
     const tileData   = storage(bufferAttr, 'vec4', count).element(instanceIndex);
@@ -113,8 +97,8 @@ export default function TileGrid({ mapBuffer, count, heightmapTexture: initialHe
     let normalVar: any = vec3(0.0, 1.0, 0.0);
     let aoVar: any     = float(1.0);
 
-    if (heightmapTextureRef.current) {
-      const htex = heightmapTextureRef.current;
+    if (heightmapTexture) {
+      const htex = heightmapTexture;
 
       // ── Center sample ──
       const h = texture(htex, uv0).g;
@@ -204,7 +188,7 @@ export default function TileGrid({ mapBuffer, count, heightmapTexture: initialHe
     mat.aoNode        = aoVar;
 
     return mat;
-  }, [bufferAttr, count, heightmapTextureRef.current]);
+  }, [bufferAttr, count, heightmapTexture]);
 
   return (
     <instancedMesh ref={meshRef} args={[undefined, materialNode, count]} castShadow receiveShadow>
