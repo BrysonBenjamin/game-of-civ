@@ -3,14 +3,14 @@
 import { Bloom } from '@react-three/postprocessing';
 import { BlendFunction, KernelSize } from 'postprocessing';
 
-// Blooms any saffron (#FFB81C) mesh whose emissive intensity > 0.
-// Targets high-luminance pixels — saffron on dark backgrounds clears the 0.4 threshold.
+// Blooms high-luminance emissive meshes (compass gold selection glow).
+// Higher threshold for parchment background — avoids blooming terrain highlights.
 export function OutlineEffect() {
   return (
     <Bloom
-      luminanceThreshold={0.4}
-      luminanceSmoothing={0.9}
-      intensity={1.5}
+      luminanceThreshold={0.65}
+      luminanceSmoothing={0.85}
+      intensity={0.8}
       blendFunction={BlendFunction.SCREEN}
       kernelSize={KernelSize.MEDIUM}
     />

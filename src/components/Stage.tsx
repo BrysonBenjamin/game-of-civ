@@ -12,14 +12,15 @@ interface StageProps {
 export function Stage({ children }: StageProps) {
   return (
     <>
-      <color attach="background" args={['#001F3F']} />
-      <fogExp2 attach="fog" args={['#001F3F', 0.0008]} />
+      {/* Parchment-tinted sky for Age of Discovery feel */}
+      <color attach="background" args={['#C8B898']} />
+      <fogExp2 attach="fog" args={['#C8B898', 0.0006]} />
 
-      {/* Warm sun — primary shadow caster */}
+      {/* Golden-hour sun — warm primary light */}
       <directionalLight
-        color="#FFF4E0"
-        intensity={1.2}
-        position={[100, 200, 100]}
+        color="#FFF0D0"
+        intensity={1.4}
+        position={[100, 200, 80]}
         castShadow
         shadow-mapSize-width={2048}
         shadow-mapSize-height={2048}
@@ -30,8 +31,8 @@ export function Stage({ children }: StageProps) {
         shadow-camera-bottom={-200}
       />
 
-      {/* Cool navy fill — softens opposite-side shadows */}
-      <directionalLight color="#3A5A8A" intensity={0.3} position={[-50, 80, -80]} />
+      {/* Warm earth fill — ochre ground bounce */}
+      <directionalLight color="#8A6A3A" intensity={0.25} position={[-50, 40, -80]} />
 
       {/* Soft ambient so nothing is fully black */}
       <ambientLight color="#ffffff" intensity={0.5} />
