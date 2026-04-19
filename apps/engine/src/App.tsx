@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Canvas } from '@react-three/fiber'
 import { OrbitControls, Environment } from '@react-three/drei'
 import { WebGPURenderer } from 'three/webgpu'
@@ -17,7 +17,29 @@ export default function App() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [mapDataStore, setMapDataStore] = useState<Record<string, any> | null>(null);
   const [unitStore, setUnitStore] = useState<any[] | null>(null);
-  const heightmapTextureRef = useRef<any>(null);
+  // State (not ref) so TileGrid re-renders and recompiles its material when bake completes
+  const [heightmapTexture, setHeightmapTexture] = useState<any>(null);
+
+  // Renderer ref — populated by the Canvas gl factory once WebGPU is initialised
+  const rendererRef = useRef<any>(null);
+  // Guard: ensures computeAsync fires exactly once regardless of INIT_MAP / Canvas ordering
+  const heightmapBakedRef = useRef(false);
+
+  // Dispatch the heightmap compute shader. Safe to call from either the gl factory
+  // (renderer ready) or the INIT_MAP handler (map data ready) — whichever arrives last
+  // will find both conditions satisfied and trigger the single bake.
+  const bakeHeightmap = useCallback(() => {
+    if (heightmapBakedRef.current || !rendererRef.current) return;
+    heightmapBakedRef.current = true;
+    const { storeTexture, computeNode } = createHeightmapComputeBinding();
+    (rendererRef.current as any).computeAsync(computeNode)
+      .then(() => {
+        setHeightmapTexture(storeTexture);
+        console.log('[Engine] Heightmap baked to GPU storage texture.');
+      })
+      .catch((err: any) => console.error('[Engine] Heightmap compute failed:', err));
+  }, []);
+
   // Headless handshake — listen for postMessage commands from a parent frame
   useEffect(() => {
     const handler = (event: MessageEvent) => {
@@ -25,20 +47,16 @@ export default function App() {
       if (data?.type === 'INIT_MAP') {
         console.log('Engine received INIT_MAP:', data.width, 'x', data.height);
         const { width, height, mapData, units } = data;
-        const buffer = generateMapBuffer(width, height, mapData);
-        setMapBuffer(buffer);
+        setMapBuffer(generateMapBuffer(width, height, mapData));
         setHexCount(width * height);
         setMapDataStore(mapData);
         setUnitStore(units);
-
-        // Initialize heightmap compute binding and store texture
-        const { storeTexture } = createHeightmapComputeBinding();
-        heightmapTextureRef.current = storeTexture;
+        bakeHeightmap(); // no-op if renderer not ready yet; gl factory will retry
       }
     };
     window.addEventListener('message', handler);
     return () => window.removeEventListener('message', handler);
-  }, []);
+  }, [bakeHeightmap]);
 
   return (
     <div style={{ width: '100vw', height: '100vh', background: '#0a0a0a' }}>
@@ -47,6 +65,8 @@ export default function App() {
         gl={async (props: any) => {
           const renderer = new WebGPURenderer({ canvas: props.canvas as HTMLCanvasElement, antialias: true });
           await renderer.init();
+          rendererRef.current = renderer;
+          bakeHeightmap(); // no-op if INIT_MAP hasn't arrived yet; IPC handler will retry
           return renderer;
         }}
         camera={{ position: [4, 4, 4], fov: 45 }}
@@ -68,7 +88,7 @@ export default function App() {
 
         {/* Instanced Hex Grid injected via message proxy */}
         <InputManager />
-        {mapBuffer && <TileGrid mapBuffer={mapBuffer} count={hexCount} heightmapTexture={heightmapTextureRef.current} />}
+        {mapBuffer && <TileGrid mapBuffer={mapBuffer} count={hexCount} heightmapTexture={heightmapTexture} />}
         {mapDataStore && (
           <>
              <ClutterInstanced mapData={mapDataStore} />
