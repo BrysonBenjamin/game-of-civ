@@ -6,3 +6,5 @@ export function falloff(dist: number): number {
   const t = 1 - Math.min(dist, 1);
   return t * t * (3 - 2 * t);
 }
+
+export * from "./bufferMath";

@@ -1,7 +1,7 @@
 "use client";
 
 import { useGameStore } from "@/store/useGameStore";
-import { getActivePlayer } from "@/engine/types";
+import { getActivePlayer } from "@civ/logic";
 import { Swords, Atom, Zap, Database, Coins, RotateCcw, Tag } from "lucide-react";
 
 export default function HUD() {

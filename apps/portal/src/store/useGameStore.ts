@@ -9,9 +9,9 @@ import type {
   Player,
   HexId,
   YieldModifier,
-} from "@/engine/types";
-import { hexKey, UNIT_TEMPLATES, ZERO_YIELD } from "@/engine/types";
-import { produceNextState } from "@/engine/stateManager";
+} from "@civ/logic";
+import { hexKey, UNIT_TEMPLATES, ZERO_YIELD } from "@civ/logic";
+import { produceNextState } from "@civ/logic";
 
 // ─── Terrain colour palettes (for canvas) ────────────────────────────────────
 
