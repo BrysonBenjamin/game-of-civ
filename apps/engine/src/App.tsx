@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Canvas } from '@react-three/fiber'
 import { OrbitControls, Environment } from '@react-three/drei'
 import { WebGPURenderer } from 'three/webgpu'
@@ -8,6 +8,7 @@ import ClutterInstanced from './ClutterInstanced'
 import { SplineManager } from './terrain/SplineManager'
 import { UnitManager } from './entities/UnitManager'
 import { InputManager } from './systems/InputManager'
+import { createHeightmapComputeBinding } from './renderer/compute/HeightmapCompute'
 import type { IpcMessage } from '@civ/protocol'
 
 export default function App() {
@@ -16,6 +17,7 @@ export default function App() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [mapDataStore, setMapDataStore] = useState<Record<string, any> | null>(null);
   const [unitStore, setUnitStore] = useState<any[] | null>(null);
+  const heightmapTextureRef = useRef<any>(null);
   // Headless handshake — listen for postMessage commands from a parent frame
   useEffect(() => {
     const handler = (event: MessageEvent) => {
@@ -28,6 +30,10 @@ export default function App() {
         setHexCount(width * height);
         setMapDataStore(mapData);
         setUnitStore(units);
+
+        // Initialize heightmap compute binding and store texture
+        const { storeTexture } = createHeightmapComputeBinding();
+        heightmapTextureRef.current = storeTexture;
       }
     };
     window.addEventListener('message', handler);
@@ -62,7 +68,7 @@ export default function App() {
 
         {/* Instanced Hex Grid injected via message proxy */}
         <InputManager />
-        {mapBuffer && <TileGrid mapBuffer={mapBuffer} count={hexCount} />}
+        {mapBuffer && <TileGrid mapBuffer={mapBuffer} count={hexCount} heightmapTexture={heightmapTextureRef.current} />}
         {mapDataStore && (
           <>
              <ClutterInstanced mapData={mapDataStore} />
