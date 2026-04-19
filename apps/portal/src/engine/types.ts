@@ -14,10 +14,21 @@
 //   Hex utilities are re-exported from helpers/hexMath.ts for convenience.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// ─── Re-exports from Helper Library ──────────────────────────────────────────
-// Backward-compatible re-exports so existing imports still work.
+// ─── Re-exports from Shared Packages ─────────────────────────────────────────
+// HexId and HexCoordinate are sourced from @civ/types (the canonical shared
+// package). All other types defined in @civ/types are also re-exported so that
+// every consumer of "@/engine/types" continues to work without path changes.
 
-export type { HexCoordinate, HexId } from "./helpers/hexMath";
+export type {
+  HexId,
+  HexCoordinate,
+  BaseTerrainType,
+  TerrainFeature,
+  YieldModifier,
+  Unit,
+} from "@civ/types";
+
+// Hex utility functions remain in the helper library.
 export {
   hexS,
   hexKey,
@@ -30,36 +41,12 @@ export {
   HEX_DIRECTIONS,
 } from "./helpers/hexMath";
 
-// We need the HexCoordinate and HexId types for use in this file
-import type { HexCoordinate, HexId } from "./helpers/hexMath";
+// We need these types for use in this file
+import type { HexCoordinate, HexId, BaseTerrainType, TerrainFeature, YieldModifier, Unit } from "@civ/types";
 
 // ─── 1. WORLD LAYER ──────────────────────────────────────────────────────────
-
-export type BaseTerrainType =
-  | "plains"
-  | "grassland"
-  | "tundra"
-  | "desert"
-  | "ocean"
-  | "snow";
-
-export type TerrainFeature =
-  | "none"
-  | "woods"
-  | "rainforest"
-  | "marsh"
-  | "mountains"
-  | "hills"
-  | "reef";
-
-// ── Yields (the four GDS resources) ──────────────────────────────────────────
-
-export interface YieldModifier {
-  readonly matter: number;
-  readonly energy: number;
-  readonly data: number;
-  readonly credits: number;
-}
+// BaseTerrainType, TerrainFeature, YieldModifier, and Tile are sourced from
+// @civ/types and re-exported above. Only portal-specific extensions live here.
 
 export const ZERO_YIELD: YieldModifier = { matter: 0, energy: 0, data: 0, credits: 0 };
 
@@ -80,6 +67,8 @@ export interface Improvement {
 }
 
 // ── Tile ─────────────────────────────────────────────────────────────────────
+// Portal extends the @civ/types Tile: improvement is a rich Improvement object
+// rather than a plain string. All portal code uses this version.
 
 export interface Tile {
   readonly hex_id: HexId;
@@ -94,25 +83,10 @@ export interface Tile {
 }
 
 // ─── 2. ENTITY LAYER ─────────────────────────────────────────────────────────
+// Unit is sourced from @civ/types and re-exported above.
 
 /** Open-ended unit type identifier (e.g., "WARRIOR", "SETTLER"). */
 export type UnitTypeId = string;
-
-export interface Unit {
-  readonly unit_id: string;
-  readonly owner_id: string;
-  readonly type_id: UnitTypeId;
-  readonly position: HexId;
-  readonly movement_remaining: number;
-  readonly max_movement: number;
-  readonly facing_direction: number;
-  readonly current_health: number;
-  readonly max_health: number;
-  readonly base_strength: number;
-  readonly experience_points: number;
-  /** "Vibe Strings" — engine reads these to apply dynamic modifiers. */
-  readonly tags: string[];
-}
 
 /** Template for spawning units. Pure data, no logic. */
 export interface UnitTemplate {

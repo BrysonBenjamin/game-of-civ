@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { noise2, falloff } from "@civ/math";
 import type { Tile } from "@/engine/types";
 import type { HexId } from "@/engine/types";
 import { axialToWorld } from "../../design/DesignTokens";
@@ -43,14 +44,7 @@ function flatFalloff(dist: number): number {
 }
 
 // Standard Gaussian falloff for feature bumps (mountains, hills).
-function falloff(dist: number): number {
-  const t = 1 - Math.min(dist, 1);
-  return t * t * (3 - 2 * t);
-}
-
-function noise2(x: number, y: number): number {
-  return Math.abs(Math.sin(x * 127.1 + y * 311.7) * 43758.5453) % 1;
-}
+// noise2 and falloff are imported from @civ/math.
 
 export function buildHeightmap(map: Record<HexId, Tile>): HeightmapResult {
   const tiles = Object.values(map);
