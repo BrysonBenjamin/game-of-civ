@@ -90,39 +90,18 @@ importers:
 
   apps/portal:
     dependencies:
-      '@civ/assets':
-        specifier: workspace:*
-        version: link:../../packages/assets
-      '@civ/logic':
-        specifier: workspace:*
-        version: link:../../packages/logic
-      '@civ/math':
-        specifier: workspace:*
-        version: link:../../packages/math
-      '@civ/protocol':
-        specifier: workspace:*
-        version: link:../../packages/protocol
-      '@civ/types':
-        specifier: workspace:*
-        version: link:../../packages/types
       lucide-react:
         specifier: ^1.8.0
         version: 1.8.0(react@19.2.4)
       next:
         specifier: 16.2.4
         version: 16.2.4(babel-plugin-react-compiler@1.0.0)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
-      postprocessing:
-        specifier: ^6.39.1
-        version: 6.39.1(three@0.184.0)
       react:
         specifier: 19.2.4
         version: 19.2.4
       react-dom:
         specifier: 19.2.4
         version: 19.2.4(react@19.2.4)
-      zustand:
-        specifier: ^5.0.12
-        version: 5.0.12(@types/react@19.2.14)(react@19.2.4)(use-sync-external-store@1.6.0(react@19.2.4))
     devDependencies:
       '@tailwindcss/postcss':
         specifier: ^4
@@ -136,9 +115,6 @@ importers:
       '@types/react-dom':
         specifier: ^19
         version: 19.2.3(@types/react@19.2.14)
-      '@types/three':
-        specifier: ^0.184.0
-        version: 0.184.0
       babel-plugin-react-compiler:
         specifier: 1.0.0
         version: 1.0.0
@@ -2134,11 +2110,6 @@ packages:
   postcss@8.5.10:
     resolution: {integrity: sha512-pMMHxBOZKFU6HgAZ4eyGnwXF/EvPGGqUr0MnZ5+99485wwW41kW91A4LOGxSHhgugZmSChL5AlElNdwlNgcnLQ==}
     engines: {node: ^10 || ^12 || >=14}
-
-  postprocessing@6.39.1:
-    resolution: {integrity: sha512-R2dG2zy+BAx3USl5EHw+PvnrlbT5PKnZVp3se0HCR0pWH8WQdh742yNG4YWOsq6c0bFpffk0Gd2RqPeoP/wKng==}
-    peerDependencies:
-      three: '>= 0.168.0 < 0.185.0'
 
   potpack@1.0.2:
     resolution: {integrity: sha512-choctRBIV9EMT9WGAZHn3V7t0Z2pMQyl0EZE6pFc/6ml3ssw7Dlf/oAOvFwjm1HVsqfQN8GfeFyJ+d8tRzqueQ==}
@@ -4650,10 +4621,6 @@ snapshots:
       nanoid: 3.3.11
       picocolors: 1.1.1
       source-map-js: 1.2.1
-
-  postprocessing@6.39.1(three@0.184.0):
-    dependencies:
-      three: 0.184.0
 
   potpack@1.0.2: {}
 
