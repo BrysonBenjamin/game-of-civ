@@ -11,7 +11,6 @@
  */
 
 import type { GameState } from "./types";
-import { getAction } from "./core/registry";
 import { runSystems } from "./core/systemRunner";
 
 /**

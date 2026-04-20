@@ -1,10 +1,15 @@
 export const HexConstants = {
   SIZE: 1.0,
-  ELEV_SCALE: 1,
+  ELEV_SCALE: 1.5,
   WATER_LEVEL: -.1,
   BASE_LAND_ELEV: 100,
   GRID_W: 64,
   GRID_H: 64,
+  PLATEAU_FRACTION: 0.7,
+  TERRAIN_SUBDIVISIONS: 150,
+  TERRAIN_NORMAL_SAMPLE_OFFSET: 0.18,
+  TERRAIN_NORMAL_UV_EPSILON: 1 / 2048,
+  TACTICAL_GRID_WIDTH: 0.03,
 } as const;
 
 export interface WorldBounds {
@@ -16,6 +21,8 @@ export interface WorldBounds {
   centerZ: number;
   worldWidth: number;
   worldHeight: number;
+  mapWidth: number;
+  mapHeight: number;
 }
 
 // Computes the world-space bounding box of the hex grid using the same
@@ -53,6 +60,8 @@ export function computeWorldBounds(width: number, height: number): WorldBounds {
     centerZ: (minZ + maxZ) / 2,
     worldWidth,
     worldHeight,
+    mapWidth: width,
+    mapHeight: height,
   };
 }
 

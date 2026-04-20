@@ -1,8 +1,6 @@
 import { useMemo } from 'react'
 import { MeshStandardNodeMaterial } from 'three/webgpu'
 import { color } from 'three/tsl'
-import { noise2 } from '@civ/math'
-import { axialToWorld } from './constants'
 
 /**
  * HexPillar — First Light test geometry.

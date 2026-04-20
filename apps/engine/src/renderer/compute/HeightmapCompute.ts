@@ -1,76 +1,145 @@
-import { wgslFn, textureStore, instanceIndex, float } from 'three/tsl';
+import * as THREE from 'three';
 import { StorageTexture } from 'three/webgpu';
+import { wgslFn, textureStore, texture, instanceIndex, float, vec2, mod, div } from 'three/tsl';
+import { HexConstants } from '../../constants';
 
-/**
- * wgslFn strings can define arbitrary WebGPU shader logic, fully executed on the GPU.
- * This translates the @civ/math pseudo-random Gaussian noise and stamp bounds
- * into a parallelized compute shader replacing HeightmapSystem.ts.
- */
+export const TERRAIN_BAKE_RESOLUTION = 256;
 
-const hash = wgslFn(`
-  fn hash(p: vec2<f32>) -> vec2<f32> {
-      var p2 = vec2<f32>(dot(p, vec2<f32>(127.1, 311.7)), dot(p, vec2<f32>(269.5, 183.3)));
-      return -1.0 + 2.0 * fract(sin(p2) * 43758.5453123);
-  }
-`);
-
-const noise2 = wgslFn(`
-  fn noise2(p: vec2<f32>) -> f32 {
-      let i = floor(p);
-      let f = fract(p);
-      let u = f * f * (3.0 - 2.0 * f);
-      return mix(
-          mix(dot(hash(i + vec2<f32>(0.0, 0.0)), f - vec2<f32>(0.0, 0.0)), 
-              dot(hash(i + vec2<f32>(1.0, 0.0)), f - vec2<f32>(1.0, 0.0)), u.x),
-          mix(dot(hash(i + vec2<f32>(0.0, 1.0)), f - vec2<f32>(0.0, 1.0)), 
-              dot(hash(i + vec2<f32>(1.0, 1.0)), f - vec2<f32>(1.0, 1.0)), u.x), u.y
-      );
-  }
-`, [hash as any]);
-
-const flatFalloff = wgslFn(`
-  fn flatFalloff(dist: f32) -> f32 {
-      if (dist < 0.60) {
-          return 1.0;
-      }
-      let t = (dist - 0.60) / 0.40;
-      return 1.0 - (t * t * (3.0 - 2.0 * t));
-  }
-`);
-
-export const heightmapComputeShader = wgslFn(`
+// Bakes the stepped-rug height field into a filtered texture so both the terrain
+// displacement and macro normal pass can sample a single continuous surface.
+const computeHeightmapShader = wgslFn(`
   fn computeHeightmap(
-    storeMap: texture_storage_2d<rgba8unorm, write>, 
-    coord: vec2<u32>, 
-    resolution: f32
+    storeHeight: texture_storage_2d<rgba16float, write>,
+    terrainData: texture_2d<f32>,
+    coord: vec2<u32>,
+    resolution: f32,
+    hexSize: f32,
+    plateauStart: f32,
+    mapWidth: f32,
+    mapHeight: f32
   ) -> void {
-      let fCoord = vec2<f32>(f32(coord.x), f32(coord.y));
-      let uv = fCoord / resolution;
-      
-      // Simulate pass 1: Base falloff logic
-      let dist = length(uv - vec2(0.5, 0.5)) * 2.0; 
-      let baseLayer = flatFalloff(dist);
-      
-      // Simulate pass 2: Noise Gaussian bumps
-      let bump = noise2(fCoord * 0.08) * 0.12;
-      let height = min(1.0, baseLayer + bump);
-
-      let outputColor = vec4<f32>(uv.x, height, uv.y, 1.0); // R: biome, G: height, B: feature
-      
-      textureStore(storeMap, coord, outputColor);
+    let coordF = vec2<f32>(f32(coord.x), f32(coord.y));
+    let uv = (coordF + vec2<f32>(0.5)) / resolution;
+    let halfRes = resolution * 0.5;
+    let q = uv.x * resolution - halfRes;
+    let r = uv.y * resolution - halfRes;
+    let worldX = hexSize * 1.5 * q;
+    let worldZ = hexSize * sqrt(3.0) * (r + q * 0.5);
+    let height = sampleSteppedTerrain(terrainData, worldX, worldZ, hexSize, plateauStart, mapWidth, mapHeight);
+    textureStore(storeHeight, coord, vec4<f32>(height, height, height, 1.0));
   }
-`, [noise2 as any, flatFalloff as any]);
 
-export function createHeightmapComputeBinding() {
-  const size = 256;
-  const storeTexture = new StorageTexture( size, size );
-  // Note: textureStore is a TSL node representing the binding
-  // This executes across a 256x256 GPU grid payload
-  const computeNode = heightmapComputeShader({
-    storeMap: textureStore(storeTexture),
-    coord: instanceIndex,
-    resolution: float(size)
-  }).compute(size * size);
-  
+  fn sampleSteppedTerrain(
+    terrainData: texture_2d<f32>,
+    worldX: f32,
+    worldZ: f32,
+    hexSize: f32,
+    plateauStart: f32,
+    mapWidth: f32,
+    mapHeight: f32
+  ) -> f32 {
+    let q = ((2.0 / 3.0) * worldX) / hexSize;
+    let r = (((sqrt(3.0) / 3.0) * worldZ) - (worldX / 3.0)) / hexSize;
+
+    let center = axialRound(q, r);
+    let dq = q - center.x;
+    let dr = r - center.y;
+    let ds = -dq - dr;
+    let edgeMetric = max(max(abs(dq), abs(dr)), abs(ds)) * 2.0;
+    let rampMask = smoothstep(plateauStart, 1.0, edgeMetric);
+
+    let centerTier = loadTier(terrainData, center.x, center.y, mapWidth, mapHeight, 0.0);
+    let neighborOffset = dominantNeighborOffset(dq, dr, ds);
+    let neighborTier = loadTier(
+      terrainData,
+      center.x + neighborOffset.x,
+      center.y + neighborOffset.y,
+      mapWidth,
+      mapHeight,
+      centerTier
+    );
+
+    return mix(centerTier, neighborTier, rampMask);
+  }
+
+  fn axialRound(q: f32, r: f32) -> vec2<f32> {
+    let s = -q - r;
+    var rq = round(q);
+    var rr = round(r);
+    var rs = round(s);
+
+    let qDiff = abs(rq - q);
+    let rDiff = abs(rr - r);
+    let sDiff = abs(rs - s);
+
+    if (qDiff > rDiff && qDiff > sDiff) {
+      rq = -rr - rs;
+    } else if (rDiff > sDiff) {
+      rr = -rq - rs;
+    } else {
+      rs = -rq - rr;
+    }
+
+    return vec2<f32>(rq, rr);
+  }
+
+  fn loadTier(
+    terrainData: texture_2d<f32>,
+    q: f32,
+    r: f32,
+    mapWidth: f32,
+    mapHeight: f32,
+    fallbackTier: f32
+  ) -> f32 {
+    let row = i32(round(r));
+    let col = i32(round(q)) + i32(floor(r * 0.5));
+    if (row < 0 || row >= i32(mapHeight) || col < 0 || col >= i32(mapWidth)) {
+      return fallbackTier;
+    }
+
+    let texel = textureLoad(terrainData, vec2<i32>(col, row), 0);
+    return round(texel.r * 255.0);
+  }
+
+  fn dominantNeighborOffset(dq: f32, dr: f32, ds: f32) -> vec2<f32> {
+    let aq = abs(dq);
+    let ar = abs(dr);
+    let aS = abs(ds);
+
+    if (aq >= ar && aq >= aS) {
+      return select(vec2<f32>(-1.0, 0.0), vec2<f32>(1.0, 0.0), dq >= 0.0);
+    }
+
+    if (ar >= aS) {
+      return select(vec2<f32>(0.0, -1.0), vec2<f32>(0.0, 1.0), dr >= 0.0);
+    }
+
+    return select(vec2<f32>(1.0, -1.0), vec2<f32>(-1.0, 1.0), ds >= 0.0);
+  }
+`);
+
+export function createHeightmapComputeBinding(terrainDataTexture: THREE.Texture, width: number, height: number) {
+  const storeTexture = new StorageTexture(TERRAIN_BAKE_RESOLUTION, TERRAIN_BAKE_RESOLUTION);
+  storeTexture.colorSpace = THREE.NoColorSpace;
+  storeTexture.wrapS = THREE.ClampToEdgeWrapping;
+  storeTexture.wrapT = THREE.ClampToEdgeWrapping;
+  storeTexture.minFilter = THREE.LinearFilter;
+  storeTexture.magFilter = THREE.LinearFilter;
+  storeTexture.type = THREE.HalfFloatType;
+
+  const xNode = mod(instanceIndex, TERRAIN_BAKE_RESOLUTION);
+  const yNode = div(instanceIndex, TERRAIN_BAKE_RESOLUTION);
+
+  const computeNode = computeHeightmapShader({
+    storeHeight: textureStore(storeTexture),
+    terrainData: texture(terrainDataTexture),
+    coord: vec2(xNode, yNode),
+    resolution: float(TERRAIN_BAKE_RESOLUTION),
+    hexSize: float(HexConstants.SIZE),
+    plateauStart: float(HexConstants.PLATEAU_FRACTION),
+    mapWidth: float(width),
+    mapHeight: float(height),
+  }).compute(TERRAIN_BAKE_RESOLUTION * TERRAIN_BAKE_RESOLUTION);
+
   return { storeTexture, computeNode };
 }

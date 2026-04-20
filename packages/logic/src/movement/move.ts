@@ -6,7 +6,7 @@
  * Check tags[] for movement modifiers before calculating cost.
  */
 
-import type { GameAction, MoveUnitCommand, GameState, HexId } from "../types";
+import type { GameAction, MoveUnitCommand, HexId } from "../types";
 import { getActivePlayer } from "../types";
 import { HexMath } from "../helpers";
 

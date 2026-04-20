@@ -7,11 +7,11 @@ import {
   instanceIndex,
   color,
   mix,
+  normalWorld,
   positionLocal,
   vec2,
   vec3,
   float,
-  uint,
   add,
   sub,
   mul,
@@ -19,63 +19,21 @@ import {
   select,
   equal,
   texture,
-  normalize,
   clamp,
   smoothstep,
   varying,
-  lessThan,
-  dot,
-  wgslFn,
 } from 'three/tsl';
 import { HexConstants } from './constants';
+import { TERRAIN_BAKE_RESOLUTION } from './renderer/compute/HeightmapCompute';
 
 interface TileGridProps {
   mapBuffer: Float32Array;
   count: number;
   heightmapTexture?: any;
+  normalTexture?: any;
   splatTexture?: any;
   biomeNormalArray?: any;
 }
-
-// -----------------------------------------------------------------------------
-// TSL Shaders
-// -----------------------------------------------------------------------------
-
-const hash21 = wgslFn(`
-  fn hash21(p: vec2<f32>) -> f32 {
-      return fract(sin(dot(p, vec2<f32>(12.9898, 78.233))) * 43758.5453) * 2.0 - 1.0;
-  }
-`);
-
-const jitterColor = wgslFn(`
-  fn jitterColor(c: vec3<f32>, jitter: f32) -> vec3<f32> {
-      let K = vec4<f32>(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);
-      let p = mix(vec4<f32>(c.bg, K.wz), vec4<f32>(c.gb, K.xy), step(c.b, c.g));
-      let q = mix(vec4<f32>(p.xyw, c.r), vec4<f32>(c.r, p.yzx), step(p.x, c.r));
-      let d = q.x - min(q.w, q.y);
-      let e = 1.0e-10;
-      var hsv = vec3<f32>(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e), q.x);
-      
-      hsv.y = clamp(hsv.y + jitter * 0.5, 0.0, 1.0); // Saturation jitter
-      hsv.z = clamp(hsv.z + jitter, 0.0, 1.0);       // Value jitter
-      
-      let K2 = vec4<f32>(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
-      let p2 = abs(fract(hsv.xxx + K2.xyz) * 6.0 - K2.www);
-      return hsv.z * mix(K2.xxx, clamp(p2 - K2.xxx, vec3<f32>(0.0), vec3<f32>(1.0)), hsv.y);
-  }
-`);
-
-// Reoriented Normal Mapping (Y-up): blends macro heightmap slope with micro-detail normal.
-// Both normals are in Y-up world space (flat surface = (0,1,0)).
-// Formula adapted from Karu & Hill 2012 for Y-dominant surfaces.
-const rnmBlendYUp = wgslFn(`
-  fn rnmBlendYUp ( base: vec3<f32>, detail: vec3<f32> ) -> vec3<f32> {
-    // Reoriented Normal Mapping (RNM) logic
-    let t = base + vec3<f32>(0.0, 0.0, 1.0);
-    let u = detail * vec3<f32>(-1.0, -1.0, 1.0);
-    return t * dot(t, u) / t.z - u;
-}
-`);
 
 // Hex Colors mapping from terrainTypeId
 // 1 = Plains, 2 = Grassland, 3 = Tundra, 4 = Desert, 5 = Ocean, 6 = Snow
@@ -85,10 +43,15 @@ const TUNDRA     = color('#7a9a8a');
 const DESERT     = color('#d4b96a');
 const OCEAN      = color('#2a6ec4');
 const SNOW       = color('#d0dde8');
-const PARCHMENT  = color('#d2b48c');
-const SNOW_WHITE = color('#f0f0f0'); // Peak tint target
 
-export default function TileGrid({ mapBuffer, count, heightmapTexture, splatTexture, biomeNormalArray }: TileGridProps) {
+export default function TileGrid({
+  mapBuffer,
+  count,
+  heightmapTexture,
+  normalTexture,
+  splatTexture,
+  biomeNormalArray,
+}: TileGridProps) {
   const meshRef = useRef<THREE.InstancedMesh>(null);
 
   // Create the WebGPU Storage Attribute
@@ -107,8 +70,6 @@ export default function TileGrid({ mapBuffer, count, heightmapTexture, splatText
     const qNode      = tileData.x;
     const rNode      = tileData.y;
     const typeIdNode = tileData.z;
-    const fogNode    = tileData.w;
-
     // ─── POSITION DISPLACEMENT ───
     const radius  = float(HexConstants.SIZE);
     const sqrt3   = float(Math.sqrt(3));
@@ -123,8 +84,8 @@ export default function TileGrid({ mapBuffer, count, heightmapTexture, splatText
     // ─── UV COORDINATES ───
     // Map axial (q, r) → heightmap UV [0, 1].
     // Clamp center UV inward by one texel to prevent edge bleed on neighbor reads.
-    const TEXEL  = float(1.0 / 256.0);
-    const HMAP_W = float(256.0);
+    const TEXEL  = float(1.0 / TERRAIN_BAKE_RESOLUTION);
+    const HMAP_W = float(TERRAIN_BAKE_RESOLUTION);
     const halfW  = div(HMAP_W, 2.0);
 
     const uRaw = div(add(qNode, halfW), HMAP_W);
@@ -142,60 +103,18 @@ export default function TileGrid({ mapBuffer, count, heightmapTexture, splatText
     let aoVar: any     = float(1.0);
 
     if (heightmapTexture) {
-      const htex = heightmapTexture;
+      const h = texture(heightmapTexture, uv0).g;
+      heightVar = varying(h, 'vHeight');
+      aoVar = varying(float(1.0), 'vAO');
+    }
 
-      // ── Center sample ──
-      const h = texture(htex, uv0).g;
+    if (normalTexture) {
+      const sampledNormal = texture(normalTexture, uv0).xyz
+        .mul(float(2.0))
+        .sub(float(1.0))
+        .normalize();
 
-      // ── Four cardinal neighbors — clamped to [0,1] to prevent map-boundary bleed ──
-      const uL = clamp(sub(uRaw, TEXEL), float(0.0), float(1.0));
-      const uR = clamp(add(uRaw, TEXEL), float(0.0), float(1.0));
-      const vD = clamp(sub(vRaw, TEXEL), float(0.0), float(1.0));
-      const vU = clamp(add(vRaw, TEXEL), float(0.0), float(1.0));
-
-      const hL = texture(htex, vec2(uL, vC)).g;
-      const hR = texture(htex, vec2(uR, vC)).g;
-      const hD = texture(htex, vec2(uC, vD)).g;
-      const hU = texture(htex, vec2(uC, vU)).g;
-
-      // ── Step A: Normal reconstruction — central-difference ──
-      const yComp     = div(float(2.0), float(HexConstants.ELEV_SCALE));
-      const rawNormal = normalize(vec3(sub(hL, hR), yComp, sub(hD, hU)));
-
-      // ── Step C: AO proxy — concavity (Laplacian) darkens valleys ──
-      const avgNeighbors = mul(add(add(add(hL, hR), hD), hU), float(0.25));
-      const curvature    = sub(avgNeighbors, h);
-      const rawAO = clamp(sub(float(1.0), mul(curvature, float(6.0))), float(0.5), float(1.0));
-
-      // ── RNM: blend macro slope with per-biome micro-detail normal ──
-      let finalNormal: any = rawNormal;
-      if (biomeNormalArray) {
-        // Map typeId → DataArrayTexture layer:
-        //   1,2 = Plains/Grassland → 0 (gentle grass bumps)
-        //   3,4,6 = Tundra/Desert/Snow → 1 (craggy rocky detail)
-        //   5 = Ocean → 2 (concentric ripple)
-        const layerFloat = select(equal(typeIdNode, float(5.0)), float(2.0),
-          select(lessThan(typeIdNode, float(3.0)), float(0.0), float(1.0)));
-
-        // Tile the detail UV 8× across the whole heightmap so detail repeats per hex
-        const TILE = float(8.0);
-        const detailUV = vec2(uC.mul(TILE).fract(), vC.mul(TILE).fract());
-
-        const microPacked = (texture(biomeNormalArray, detailUV as any) as any)
-          .depth(uint(layerFloat)).xyz;
-        // Unpack [0,1] → [-1,1] (Y-up: flat surface stored as (0.5, 1.0, 0.5))
-        const microNormal = microPacked.mul(float(2.0)).sub(float(1.0));
-
-        const finalNormal = rnmBlendYUp({ 
-          base: rawNormal, 
-          detail: microNormal 
-        });
-      }
-
-      // Promote to varyings — computed once in vertex stage, interpolated to fragment
-      heightVar = varying(h,           'vHeight');
-      normalVar = varying(finalNormal, 'vDerivedNormal');
-      aoVar     = varying(rawAO,       'vAO');
+      normalVar = varying(sampledNormal, 'vDerivedNormal');
     }
 
     // ─── FINAL VERTEX POSITION ───
@@ -245,35 +164,6 @@ export default function TileGrid({ mapBuffer, count, heightmapTexture, splatText
         select(equal(typeIdNode, 6), SNOW, OCEAN))))));
     }
 
-    // ── Step B-heroic: Elevation Tint & Procedural Color Jitter ──
-    const pNode = vec2(qNode, rNode) as any;
-    const rawHash = hash21({ p: pNode }) as any;
-    const jitterValue = mul(rawHash, float(0.05)) as any;
-    
-    // c parameter is vec3, assure uniform structure bypassing node proxy rules
-    const cNode = vec3(baseColor as any);
-    const jitteredBase = jitterColor({ c: cNode, jitter: jitterValue }) as any;
-    
-    const snowTint   = smoothstep(float(0.7), float(1.0), heightVar);
-    const tintedBase = mix(jitteredBase, SNOW_WHITE, snowTint) as any;
-
-    // ─── FOG OF WAR ───
-    // Unexplored (< 0.25): PARCHMENT
-    // Explored   (0.25–0.75): desaturated biome overlay
-    // Visible    (> 0.75): full tinted color
-    const luminance    = dot(tintedBase, vec3(0.299, 0.587, 0.114));
-    const exploredBase = mix(PARCHMENT, vec3(luminance), 0.5);
-
-    const finalColor = select(
-      lessThan(fogNode, 0.25),
-      PARCHMENT,
-      select(
-        lessThan(fogNode, 0.75),
-        mix(exploredBase, tintedBase, 0.3),
-        tintedBase
-      )
-    ) as any;
-
     // ─── Step B: Biome-Driven PBR Properties ───
     // Ocean: mirror-like (low rough, high metal). Snow/Tundra: sparkle/frozen.
     // Everything else: matte tactile land.
@@ -287,9 +177,17 @@ export default function TileGrid({ mapBuffer, count, heightmapTexture, splatText
 
     // ─── MATERIAL ASSEMBLY ───
     const mat = new THREE.MeshStandardNodeMaterial();
+    mat.flatShading = false;
+    mat.wireframe = false;
     mat.positionNode  = finalPosition;
-    mat.colorNode     = finalColor;
     mat.normalNode    = normalVar;
+
+    const biomeColorNode = vec3(baseColor as any);
+    const isFlatGround = smoothstep(float(0.7), float(0.9), normalWorld.y);
+    const cliffColor = color('#4a3b2c');
+    const terrainColor = mix(cliffColor, biomeColorNode, isFlatGround);
+
+    mat.colorNode     = terrainColor as any;
     mat.roughnessNode = roughnessNode as any;
     mat.metalnessNode = metalnessNode as any;
     mat.aoNode        = aoVar;
@@ -300,7 +198,7 @@ export default function TileGrid({ mapBuffer, count, heightmapTexture, splatText
       document.body.innerHTML = `<h1 style="color:red;z-index:9999;position:absolute;">${e.message}<br/>${e.stack}</h1>`;
       return new THREE.MeshBasicMaterial({ color: 'red' });
     }
-  }, [bufferAttr, count, heightmapTexture, splatTexture, biomeNormalArray]);
+  }, [bufferAttr, count, heightmapTexture, normalTexture, splatTexture, biomeNormalArray]);
 
   return (
     <instancedMesh ref={meshRef} args={[undefined, materialNode, count]} castShadow receiveShadow>

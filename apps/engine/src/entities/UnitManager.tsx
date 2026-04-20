@@ -11,7 +11,6 @@ function EngineUnit({ unit, worldScale }: { unit: any; worldScale: number }) {
   const meshRef = useRef<THREE.Mesh>(null);
   
   const targetPos = useMemo(() => {
-    const coord = unit.position; // assuming HexId split string logic
     // simplified flat mapping for now, assuming unit.coord exists in payload
     const q = unit.coord?.q ?? 0;
     const r = unit.coord?.r ?? 0;
