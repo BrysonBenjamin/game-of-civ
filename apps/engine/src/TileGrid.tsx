@@ -1,3 +1,5 @@
+// @deprecated — use TerrainRug.tsx (continuous rug renderer).
+// Kept for debug comparison: append ?debug to the URL to show this alongside the rug.
 import { useMemo, useRef } from 'react';
 import * as THREE from 'three/webgpu';
 import {
@@ -9,6 +11,7 @@ import {
   vec2,
   vec3,
   float,
+  uint,
   add,
   sub,
   mul,
@@ -31,6 +34,7 @@ interface TileGridProps {
   count: number;
   heightmapTexture?: any;
   splatTexture?: any;
+  biomeNormalArray?: any;
 }
 
 // -----------------------------------------------------------------------------
@@ -61,6 +65,18 @@ const jitterColor = wgslFn(`
   }
 `);
 
+// Reoriented Normal Mapping (Y-up): blends macro heightmap slope with micro-detail normal.
+// Both normals are in Y-up world space (flat surface = (0,1,0)).
+// Formula adapted from Karu & Hill 2012 for Y-dominant surfaces.
+const rnmBlendYUp = wgslFn(`
+  fn rnmBlendYUp ( base: vec3<f32>, detail: vec3<f32> ) -> vec3<f32> {
+    // Reoriented Normal Mapping (RNM) logic
+    let t = base + vec3<f32>(0.0, 0.0, 1.0);
+    let u = detail * vec3<f32>(-1.0, -1.0, 1.0);
+    return t * dot(t, u) / t.z - u;
+}
+`);
+
 // Hex Colors mapping from terrainTypeId
 // 1 = Plains, 2 = Grassland, 3 = Tundra, 4 = Desert, 5 = Ocean, 6 = Snow
 const PLAINS     = color('#8fbc5a');
@@ -72,7 +88,7 @@ const SNOW       = color('#d0dde8');
 const PARCHMENT  = color('#d2b48c');
 const SNOW_WHITE = color('#f0f0f0'); // Peak tint target
 
-export default function TileGrid({ mapBuffer, count, heightmapTexture, splatTexture }: TileGridProps) {
+export default function TileGrid({ mapBuffer, count, heightmapTexture, splatTexture, biomeNormalArray }: TileGridProps) {
   const meshRef = useRef<THREE.InstancedMesh>(null);
 
   // Create the WebGPU Storage Attribute
@@ -143,23 +159,43 @@ export default function TileGrid({ mapBuffer, count, heightmapTexture, splatText
       const hU = texture(htex, vec2(uC, vU)).g;
 
       // ── Step A: Normal reconstruction — central-difference ──
-      // n = normalize(vec3(hL - hR, 2 / ELEV_SCALE, hD - hU))
-      // The Y component (2/ELEV_SCALE) keeps slope steepness accurate to the
-      // visual displacement applied to the geometry.
       const yComp     = div(float(2.0), float(HexConstants.ELEV_SCALE));
       const rawNormal = normalize(vec3(sub(hL, hR), yComp, sub(hD, hU)));
 
       // ── Step C: AO proxy — concavity (Laplacian) darkens valleys ──
-      // curvature = avg(neighbors) − center; positive ⇒ concave (valley)
       const avgNeighbors = mul(add(add(add(hL, hR), hD), hU), float(0.25));
       const curvature    = sub(avgNeighbors, h);
-      // Valleys (curvature > 0) → ao approaches 0.5; ridges/peaks → ao = 1.0
       const rawAO = clamp(sub(float(1.0), mul(curvature, float(6.0))), float(0.5), float(1.0));
 
+      // ── RNM: blend macro slope with per-biome micro-detail normal ──
+      let finalNormal: any = rawNormal;
+      if (biomeNormalArray) {
+        // Map typeId → DataArrayTexture layer:
+        //   1,2 = Plains/Grassland → 0 (gentle grass bumps)
+        //   3,4,6 = Tundra/Desert/Snow → 1 (craggy rocky detail)
+        //   5 = Ocean → 2 (concentric ripple)
+        const layerFloat = select(equal(typeIdNode, float(5.0)), float(2.0),
+          select(lessThan(typeIdNode, float(3.0)), float(0.0), float(1.0)));
+
+        // Tile the detail UV 8× across the whole heightmap so detail repeats per hex
+        const TILE = float(8.0);
+        const detailUV = vec2(uC.mul(TILE).fract(), vC.mul(TILE).fract());
+
+        const microPacked = (texture(biomeNormalArray, detailUV as any) as any)
+          .depth(uint(layerFloat)).xyz;
+        // Unpack [0,1] → [-1,1] (Y-up: flat surface stored as (0.5, 1.0, 0.5))
+        const microNormal = microPacked.mul(float(2.0)).sub(float(1.0));
+
+        const finalNormal = rnmBlendYUp({ 
+          base: rawNormal, 
+          detail: microNormal 
+        });
+      }
+
       // Promote to varyings — computed once in vertex stage, interpolated to fragment
-      heightVar = varying(h,          'vHeight');
-      normalVar = varying(rawNormal,  'vDerivedNormal');
-      aoVar     = varying(rawAO,      'vAO');
+      heightVar = varying(h,           'vHeight');
+      normalVar = varying(finalNormal, 'vDerivedNormal');
+      aoVar     = varying(rawAO,       'vAO');
     }
 
     // ─── FINAL VERTEX POSITION ───
@@ -238,15 +274,16 @@ export default function TileGrid({ mapBuffer, count, heightmapTexture, splatText
       )
     ) as any;
 
-    // ─── Step B: Height-Aware PBR Properties ───
-    const waterLevel = float(HexConstants.WATER_LEVEL);
-    const isWater    = lessThan(heightVar, waterLevel) as any;
+    // ─── Step B: Biome-Driven PBR Properties ───
+    // Ocean: mirror-like (low rough, high metal). Snow/Tundra: sparkle/frozen.
+    // Everything else: matte tactile land.
+    const isOcean = equal(typeIdNode, float(5.0)) as any;
 
-    // Roughness: deep water ≈ 0.05 (specular glints); land ≈ 0.85 (matte tactile)
-    const roughnessNode = select(isWater, float(0.05), float(0.85)) as any;
+    const roughnessNode = select(isOcean, float(0.05),
+      select(equal(typeIdNode, float(6.0)), float(0.40),
+      select(equal(typeIdNode, float(3.0)), float(0.60), float(0.85)))) as any;
 
-    // Metalness: water = 1.0 to enhance wet IBL reflection; land = 0.0
-    const metalnessNode = select(isWater, float(1.0), float(0.0)) as any;
+    const metalnessNode = select(isOcean, float(0.80), float(0.0)) as any;
 
     // ─── MATERIAL ASSEMBLY ───
     const mat = new THREE.MeshStandardNodeMaterial();
@@ -263,7 +300,7 @@ export default function TileGrid({ mapBuffer, count, heightmapTexture, splatText
       document.body.innerHTML = `<h1 style="color:red;z-index:9999;position:absolute;">${e.message}<br/>${e.stack}</h1>`;
       return new THREE.MeshBasicMaterial({ color: 'red' });
     }
-  }, [bufferAttr, count, heightmapTexture, splatTexture]);
+  }, [bufferAttr, count, heightmapTexture, splatTexture, biomeNormalArray]);
 
   return (
     <instancedMesh ref={meshRef} args={[undefined, materialNode, count]} castShadow receiveShadow>
