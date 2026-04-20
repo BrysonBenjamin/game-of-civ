@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Canvas } from '@react-three/fiber'
 import { OrbitControls, Environment } from '@react-three/drei'
 import { WebGPURenderer } from 'three/webgpu'
+import { ACESFilmicToneMapping, SRGBColorSpace } from 'three'
 import { generateMapBuffer } from '@civ/math'
 import TileGrid from './TileGrid'
 import ClutterInstanced from './ClutterInstanced'
@@ -9,6 +10,7 @@ import { SplineManager } from './terrain/SplineManager'
 import { UnitManager } from './entities/UnitManager'
 import { InputManager } from './systems/InputManager'
 import { createHeightmapComputeBinding } from './renderer/compute/HeightmapCompute'
+import { createSplatComputeBinding } from './renderer/compute/SplatCompute'
 import type { IpcMessage } from '@civ/protocol'
 
 export default function App() {
@@ -17,8 +19,10 @@ export default function App() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [mapDataStore, setMapDataStore] = useState<Record<string, any> | null>(null);
   const [unitStore, setUnitStore] = useState<any[] | null>(null);
-  // State (not ref) so TileGrid re-renders and recompiles its material when bake completes
+
   const [heightmapTexture, setHeightmapTexture] = useState<any>(null);
+  const [splatTexture, setSplatTexture] = useState<any>(null);
+  const mapParamsRef = useRef<{buffer: Float32Array, width: number, height: number} | null>(null);
 
   // Renderer ref — populated by the Canvas gl factory once WebGPU is initialised
   const rendererRef = useRef<any>(null);
@@ -29,15 +33,22 @@ export default function App() {
   // (renderer ready) or the INIT_MAP handler (map data ready) — whichever arrives last
   // will find both conditions satisfied and trigger the single bake.
   const bakeHeightmap = useCallback(() => {
-    if (heightmapBakedRef.current || !rendererRef.current) return;
+    if (heightmapBakedRef.current || !rendererRef.current || !mapParamsRef.current) return;
     heightmapBakedRef.current = true;
+    
     const { storeTexture, computeNode } = createHeightmapComputeBinding();
-    (rendererRef.current as any).computeAsync(computeNode)
+    const { storeTexture: splatStoreTex, computeNode: splatComputeNode } = createSplatComputeBinding(mapParamsRef.current.buffer, mapParamsRef.current.width, mapParamsRef.current.height);
+
+    Promise.all([
+      (rendererRef.current as any).computeAsync(computeNode),
+      (rendererRef.current as any).computeAsync(splatComputeNode)
+    ])
       .then(() => {
         setHeightmapTexture(storeTexture);
-        console.log('[Engine] Heightmap baked to GPU storage texture.');
+        setSplatTexture(splatStoreTex);
+        console.log('[Engine] Compute shaders baked successfully.');
       })
-      .catch((err: any) => console.error('[Engine] Heightmap compute failed:', err));
+      .catch((err: any) => console.error('[Engine] Compute pass failed:', err));
   }, []);
 
   // Headless handshake — listen for postMessage commands from a parent frame
@@ -47,7 +58,9 @@ export default function App() {
       if (data?.type === 'INIT_MAP') {
         console.log('Engine received INIT_MAP:', data.width, 'x', data.height);
         const { width, height, mapData, units } = data;
-        setMapBuffer(generateMapBuffer(width, height, mapData));
+        const generatedBuffer = generateMapBuffer(width, height, mapData);
+        setMapBuffer(generatedBuffer);
+        mapParamsRef.current = { buffer: generatedBuffer, width, height };
         setHexCount(width * height);
         setMapDataStore(mapData);
         setUnitStore(units);
@@ -55,6 +68,45 @@ export default function App() {
       }
     };
     window.addEventListener('message', handler);
+
+    // -- NATIVE STANDALONE SANDBOX --
+    // If the engine is accessed directly without an iframe host, self-dispatch a generated map
+    if (window.top === window.self) {
+      console.log('[Engine] Standalone mode detected! Generating native sandbox hex grid...');
+      const width = 64;
+      const height = 64;
+      
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const mockMapData: Record<string, any> = {};
+      const biomes = ['plains', 'grassland', 'tundra', 'desert', 'ocean', 'snow'];
+      const features = ['woods', 'rainforest', 'none', 'none', 'none', 'none'];
+      
+      for (let row = 0; row < height; row++) {
+        const q_offset = Math.floor(row / 2);
+        for (let col = -q_offset; col < width - q_offset; col++) {
+          const q = col;
+          const r = row;
+          const randomBiome = biomes[Math.floor(Math.random() * biomes.length)];
+          const randomFeature = features[Math.floor(Math.random() * features.length)];
+          mockMapData[`${q},${r}`] = { 
+            baseTerrain: randomBiome, 
+            visibility: 1.0,
+            feature: randomFeature,
+            coord: { q, r }
+          };
+        }
+      }
+      
+      // Dispatch payload to our own listener
+      window.postMessage({
+        type: 'INIT_MAP',
+        width,
+        height,
+        mapData: mockMapData,
+        units: []
+      }, '*');
+    }
+
     return () => window.removeEventListener('message', handler);
   }, [bakeHeightmap]);
 
@@ -65,30 +117,37 @@ export default function App() {
         gl={async (props: any) => {
           const renderer = new WebGPURenderer({ canvas: props.canvas as HTMLCanvasElement, antialias: true });
           await renderer.init();
+          
+          renderer.toneMapping = ACESFilmicToneMapping;
+          renderer.toneMappingExposure = 1.2;
+          renderer.outputColorSpace = SRGBColorSpace;
+          
           rendererRef.current = renderer;
           bakeHeightmap(); // no-op if INIT_MAP hasn't arrived yet; IPC handler will retry
           return renderer;
         }}
-        camera={{ position: [4, 4, 4], fov: 45 }}
+        camera={{ position: [24, 60, 120], fov: 45 }}
         shadows
         style={{ width: '100%', height: '100%' }}
       >
         {/* Lighting */}
         <ambientLight intensity={0.3} />
         <directionalLight
-          position={[10, 12, 5]}
+          position={[24, 100, 83]}
           intensity={2.0}
           castShadow
-          shadow-mapSize-width={2048}
-          shadow-mapSize-height={2048}
-        />
+          shadow-mapSize-width={4096}
+          shadow-mapSize-height={4096}
+        >
+          <orthographicCamera attach="shadow-camera" args={[-150, 150, 150, -150, 0.1, 500]} />
+        </directionalLight>
 
-        {/* Environment lighting — city HDRI for PBR reflections */}
-        <Environment preset="city" />
+        {/* Environment lighting — natural HDRI for PBR reflections */}
+        <Environment preset="sunset" />
 
         {/* Instanced Hex Grid injected via message proxy */}
         <InputManager />
-        {mapBuffer && <TileGrid mapBuffer={mapBuffer} count={hexCount} heightmapTexture={heightmapTexture} />}
+        {mapBuffer && <TileGrid mapBuffer={mapBuffer} count={hexCount} heightmapTexture={heightmapTexture} splatTexture={splatTexture} />}
         {mapDataStore && (
           <>
              <ClutterInstanced mapData={mapDataStore} />
@@ -98,12 +157,12 @@ export default function App() {
         {unitStore && <UnitManager units={unitStore} worldScale={1.0} />}
 
         {/* Ground plane for shadow reception */}
-        <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.3, 0]} receiveShadow>
-          <planeGeometry args={[20, 20]} />
+        <mesh rotation={[-Math.PI / 2, 0, 0]} position={[24, -0.3, 83]} receiveShadow>
+          <planeGeometry args={[400, 400]} />
           <meshStandardMaterial color="#111" roughness={1} />
         </mesh>
 
-        <OrbitControls makeDefault />
+        <OrbitControls makeDefault target={[24, 0, 83]} />
       </Canvas>
     </div>
   );

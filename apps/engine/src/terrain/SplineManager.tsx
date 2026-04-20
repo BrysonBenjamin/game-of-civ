@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { useMemo } from 'react';
 import { hexNeighbours } from '@civ/logic';
+import { axialToWorld } from '@civ/math';
 
 // Extracted from engine payload shape
 interface SplineManagerProps {
@@ -37,10 +38,8 @@ export function SplineManager({ mapData, worldScale }: SplineManagerProps) {
       const a = mapData[aId];
       const b = mapData[bId];
       
-      const ax = worldScale * (3 / 2) * a.coord.q;
-      const az = worldScale * (Math.sqrt(3) / 2 * a.coord.q + Math.sqrt(3) * a.coord.r);
-      const bx = worldScale * (3 / 2) * b.coord.q;
-      const bz = worldScale * (Math.sqrt(3) / 2 * b.coord.q + Math.sqrt(3) * b.coord.r);
+      const [ax, az] = axialToWorld(a.coord.q, a.coord.r, worldScale);
+      const [bx, bz] = axialToWorld(b.coord.q, b.coord.r, worldScale);
       
       pts.push(new THREE.Vector3((ax + bx) / 2, 0.05, (az + bz) / 2));
     }

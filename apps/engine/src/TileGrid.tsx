@@ -20,6 +20,9 @@ import {
   clamp,
   smoothstep,
   varying,
+  lessThan,
+  dot,
+  wgslFn,
 } from 'three/tsl';
 import { HexConstants } from './constants';
 
@@ -27,11 +30,36 @@ interface TileGridProps {
   mapBuffer: Float32Array;
   count: number;
   heightmapTexture?: any;
+  splatTexture?: any;
 }
 
 // -----------------------------------------------------------------------------
 // TSL Shaders
 // -----------------------------------------------------------------------------
+
+const hash21 = wgslFn(`
+  fn hash21(p: vec2<f32>) -> f32 {
+      return fract(sin(dot(p, vec2<f32>(12.9898, 78.233))) * 43758.5453) * 2.0 - 1.0;
+  }
+`);
+
+const jitterColor = wgslFn(`
+  fn jitterColor(c: vec3<f32>, jitter: f32) -> vec3<f32> {
+      let K = vec4<f32>(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);
+      let p = mix(vec4<f32>(c.bg, K.wz), vec4<f32>(c.gb, K.xy), step(c.b, c.g));
+      let q = mix(vec4<f32>(p.xyw, c.r), vec4<f32>(c.r, p.yzx), step(p.x, c.r));
+      let d = q.x - min(q.w, q.y);
+      let e = 1.0e-10;
+      var hsv = vec3<f32>(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e), q.x);
+      
+      hsv.y = clamp(hsv.y + jitter * 0.5, 0.0, 1.0); // Saturation jitter
+      hsv.z = clamp(hsv.z + jitter, 0.0, 1.0);       // Value jitter
+      
+      let K2 = vec4<f32>(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
+      let p2 = abs(fract(hsv.xxx + K2.xyz) * 6.0 - K2.www);
+      return hsv.z * mix(K2.xxx, clamp(p2 - K2.xxx, vec3<f32>(0.0), vec3<f32>(1.0)), hsv.y);
+  }
+`);
 
 // Hex Colors mapping from terrainTypeId
 // 1 = Plains, 2 = Grassland, 3 = Tundra, 4 = Desert, 5 = Ocean, 6 = Snow
@@ -44,7 +72,7 @@ const SNOW       = color('#d0dde8');
 const PARCHMENT  = color('#d2b48c');
 const SNOW_WHITE = color('#f0f0f0'); // Peak tint target
 
-export default function TileGrid({ mapBuffer, count, heightmapTexture }: TileGridProps) {
+export default function TileGrid({ mapBuffer, count, heightmapTexture, splatTexture }: TileGridProps) {
   const meshRef = useRef<THREE.InstancedMesh>(null);
 
   // Create the WebGPU Storage Attribute
@@ -57,7 +85,8 @@ export default function TileGrid({ mapBuffer, count, heightmapTexture }: TileGri
   // StorageTexture once App.tsx's computeAsync resolves — that state update causes
   // a re-render here and rebuilds the full node material with live texture reads.
   const materialNode = useMemo(() => {
-    // Read the vec4 from the storage buffer using instanceIndex
+    try {
+      // Read the vec4 from the storage buffer using instanceIndex
     const tileData   = storage(bufferAttr, 'vec4', count).element(instanceIndex);
     const qNode      = tileData.x;
     const rNode      = tileData.y;
@@ -65,16 +94,15 @@ export default function TileGrid({ mapBuffer, count, heightmapTexture }: TileGri
     const fogNode    = tileData.w;
 
     // ─── POSITION DISPLACEMENT ───
-    // Replicate axialToWorld math in TSL (Flat-Top)
-    const spacing = float(0);
     const radius  = float(HexConstants.SIZE);
     const sqrt3   = float(Math.sqrt(3));
-    const wNode   = mul(radius, sqrt3);
-    const hNode   = mul(radius, 2.0);
-    const wStep   = add(wNode, spacing);
-    const px      = add(mul(qNode, wStep), mul(rNode, mul(wStep, 0.5)));
-    const pzStep  = mul(add(hNode, spacing), 0.75);
-    const pz      = mul(rNode, pzStep);
+    
+    // Flat-Top Hex Projection:
+    // x = size * 3/2 * q
+    // z = size * sqrt(3) * (r + q / 2)
+    const px = mul(radius, mul(float(1.5), qNode));
+    const pzTerm = add(rNode, mul(qNode, float(0.5)));
+    const pz = mul(mul(radius, sqrt3), pzTerm);
 
     // ─── UV COORDINATES ───
     // Map axial (q, r) → heightmap UV [0, 1].
@@ -136,33 +164,75 @@ export default function TileGrid({ mapBuffer, count, heightmapTexture }: TileGri
 
     // ─── FINAL VERTEX POSITION ───
     const heightDisplacement = mul(heightVar, float(HexConstants.ELEV_SCALE));
-    const finalPosition = positionLocal.add(vec3(px, heightDisplacement, pz));
+    const finalPosition = add(positionLocal, vec3(px, heightDisplacement, pz));
 
     // ─── TERRAIN BASE COLOR ───
-    const baseColor = select(equal(typeIdNode, 1), PLAINS,
-      select(equal(typeIdNode, 2), GRASSLAND,
-      select(equal(typeIdNode, 3), TUNDRA,
-      select(equal(typeIdNode, 4), DESERT,
-      select(equal(typeIdNode, 5), OCEAN,
-      select(equal(typeIdNode, 6), SNOW, OCEAN))))));
+    let baseColor: any = color('#000');
+    
+    if (splatTexture) {
+      // Find continuous exact UV 
+      const radiusF = float(HexConstants.SIZE);
+      const sqrt3F  = float(Math.sqrt(3));
+      
+      const wX = finalPosition.x;
+      const wZ = finalPosition.z;
+      
+      const qFloat = div(mul(float(2.0/3.0), wX), radiusF);
+      const rFloat = div(sub(mul(div(sqrt3F, float(3.0)), wZ), mul(float(1.0/3.0), wX)), radiusF);
+      
+      // Match SplatTexture's 64x64 format mathematically from axial float positions!
+      // array layout: row = r, index = col + floor(row/2), which maps exactly to (q + q_offset)
+      const qOffsetFrag = div(rFloat, float(2.0)).floor();
+      const splatU = div(add(qFloat, qOffsetFrag), float(64.0));
+      const splatV = div(rFloat, float(64.0));
+      
+      // Fix UV boundary edge constraints 
+      const uvFrag = vec2(splatU, splatV);
+      
+      const splat = texture(splatTexture, uvFrag);
+      
+      const pVec = vec3(PLAINS as any);
+      const gVec = vec3(GRASSLAND as any);
+      const dVec = vec3(DESERT as any);
+      const oVec = vec3(OCEAN as any);
+      
+      baseColor = add(
+        add(mul(pVec, splat.r), mul(gVec, splat.g)),
+        add(mul(dVec, splat.b), mul(oVec, splat.a))
+      ) as any;
+    } else {
+      baseColor = select(equal(typeIdNode, 1), PLAINS,
+        select(equal(typeIdNode, 2), GRASSLAND,
+        select(equal(typeIdNode, 3), TUNDRA,
+        select(equal(typeIdNode, 4), DESERT,
+        select(equal(typeIdNode, 5), OCEAN,
+        select(equal(typeIdNode, 6), SNOW, OCEAN))))));
+    }
 
-    // ── Step B-heroic: Elevation Tint — peaks shift toward snow/stone white ──
+    // ── Step B-heroic: Elevation Tint & Procedural Color Jitter ──
+    const pNode = vec2(qNode, rNode) as any;
+    const rawHash = hash21({ p: pNode }) as any;
+    const jitterValue = mul(rawHash, float(0.05)) as any;
+    
+    // c parameter is vec3, assure uniform structure bypassing node proxy rules
+    const cNode = vec3(baseColor as any);
+    const jitteredBase = jitterColor({ c: cNode, jitter: jitterValue }) as any;
+    
     const snowTint   = smoothstep(float(0.7), float(1.0), heightVar);
-    const tintedBase = mix(vec3(baseColor), vec3(SNOW_WHITE), snowTint) as any;
+    const tintedBase = mix(jitteredBase, SNOW_WHITE, snowTint) as any;
 
     // ─── FOG OF WAR ───
     // Unexplored (< 0.25): PARCHMENT
     // Explored   (0.25–0.75): desaturated biome overlay
     // Visible    (> 0.75): full tinted color
-    const luminance    = tintedBase.dot(vec3(0.299, 0.587, 0.114));
+    const luminance    = dot(tintedBase, vec3(0.299, 0.587, 0.114));
     const exploredBase = mix(PARCHMENT, vec3(luminance), 0.5);
 
-    // @ts-expect-error deeply nested TSL unions exceed r184 generic limits
     const finalColor = select(
-      fogNode.lessThan(0.25),
+      lessThan(fogNode, 0.25),
       PARCHMENT,
       select(
-        fogNode.lessThan(0.75),
+        lessThan(fogNode, 0.75),
         mix(exploredBase, tintedBase, 0.3),
         tintedBase
       )
@@ -170,13 +240,13 @@ export default function TileGrid({ mapBuffer, count, heightmapTexture }: TileGri
 
     // ─── Step B: Height-Aware PBR Properties ───
     const waterLevel = float(HexConstants.WATER_LEVEL);
-    const isWater    = (heightVar as any).lessThan(waterLevel);
+    const isWater    = lessThan(heightVar, waterLevel) as any;
 
     // Roughness: deep water ≈ 0.05 (specular glints); land ≈ 0.85 (matte tactile)
-    const roughnessNode = select(isWater, float(0.05), float(0.85));
+    const roughnessNode = select(isWater, float(0.05), float(0.85)) as any;
 
     // Metalness: water = 1.0 to enhance wet IBL reflection; land = 0.0
-    const metalnessNode = select(isWater, float(1.0), float(0.0));
+    const metalnessNode = select(isWater, float(1.0), float(0.0)) as any;
 
     // ─── MATERIAL ASSEMBLY ───
     const mat = new THREE.MeshStandardNodeMaterial();
@@ -188,7 +258,12 @@ export default function TileGrid({ mapBuffer, count, heightmapTexture }: TileGri
     mat.aoNode        = aoVar;
 
     return mat;
-  }, [bufferAttr, count, heightmapTexture]);
+    } catch (e: any) {
+      console.error("MATERIAL NODE CRASH:", e);
+      document.body.innerHTML = `<h1 style="color:red;z-index:9999;position:absolute;">${e.message}<br/>${e.stack}</h1>`;
+      return new THREE.MeshBasicMaterial({ color: 'red' });
+    }
+  }, [bufferAttr, count, heightmapTexture, splatTexture]);
 
   return (
     <instancedMesh ref={meshRef} args={[undefined, materialNode, count]} castShadow receiveShadow>

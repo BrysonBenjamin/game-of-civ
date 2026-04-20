@@ -6,9 +6,13 @@ export function generateMapBuffer(width: number, height: number, mapData: Record
     plains: 1, grassland: 2, tundra: 3, desert: 4, ocean: 5, snow: 6
   };
   
-  for (let q = 0; q < width; q++) {
-    for (let r = 0; r < height; r++) {
-      const idx = (q * height + r) * 4;
+  let i = 0;
+  for (let row = 0; row < height; row++) {
+    const q_offset = Math.floor(row / 2);
+    for (let col = -q_offset; col < width - q_offset; col++) {
+      const q = col;
+      const r = row;
+      const idx = i * 4;
       const hexId = `${q},${r}`;
       const tile = mapData[hexId];
       
@@ -23,6 +27,7 @@ export function generateMapBuffer(width: number, height: number, mapData: Record
         buffer[idx + 2] = 5; // ocean boundary fallback
         buffer[idx + 3] = 0.0; // unrevealed
       }
+      i++;
     }
   }
   

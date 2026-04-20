@@ -8,3 +8,4 @@ export function falloff(dist: number): number {
 }
 
 export * from "./bufferMath";
+export * from "./hexMath";

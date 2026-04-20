@@ -1,6 +1,7 @@
 import { useMemo, useRef, useLayoutEffect } from 'react';
 import * as THREE from 'three';
-import { axialToWorld } from './constants';
+import { HexConstants } from './constants';
+import { axialToWorld } from '@civ/math';
 
 function seededRand(seed: number): number {
   const s = Math.sin(seed * 9301 + 49297) * 233280;
@@ -27,7 +28,7 @@ export default function ClutterInstanced({ mapData }: { mapData: Record<string, 
       const feat = tile.feature;
       // Only processing woods based on prompt scope (rainforest can be appended iteratively)
       if (feat === 'woods' || feat === 'rainforest') {
-        const [cx, cz] = axialToWorld(tile.coord.q, tile.coord.r);
+        const [cx, cz] = axialToWorld(tile.coord.q, tile.coord.r, HexConstants.SIZE);
         
         // 3 hero trees, 2 edge trees
         const total = 5;
